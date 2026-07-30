@@ -1,0 +1,384 @@
+{
+  "name": "AI Daily News Reporter",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "id": "be2f1945-f338-43d5-a4ec-b7ace38cdbdf",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        3296,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Starts the workflow every day at 10:00 in the workflow timezone."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - WORKFLOW CONFIGURATION\n * ---------------------------------------------------------------------------\n * Centralize delivery, ingestion, model, and editorial selection settings.\n * Replace the example email addresses after import. \n */\n\nconst config = {\n  // Delivery\n  senderEmail: 'sender@example.com',\n  recipientEmail: 'recipient@example.com',\n  subjectPrefix: 'Günlük Haber Bülteni',\n  headerTitle: 'Günlük Haber Bülteni',\n  locale: 'tr-TR',\n  timeZone: 'Europe/Istanbul',\n\n  // Ingestion and feed health\n  lookbackHours: 24, // Process articles published within the last 24 hours\n  futureToleranceMinutes: 10, // Allow small publisher clock differences\n  maxArticlesPerSource: 70, // Bound the contribution of a single feed\n  minHealthySources: 5, // Stop if fewer than five configured feeds are healthy\n  minTitleLength: 15, // Reject malformed or uninformative titles\n  snippetLength: 600, // Bound the source text sent to the model\n\n  // LLM scoring\n  targetBatchCount: 4, // Bound the number of scoring calls\n  minScoringCoverage: 1, // Require one valid score per article\n\n  // Editorial selection\n  maxHeadlines: 25, // Maximum number of stories in one newsletter\n  minHeadlines: 8, // Stop if too few stories pass the editorial gate\n  categoryLeaderMinScore: 6, // Require a strong lead story for category representation\n  fillMinScore: 5, // Allow notable score-5 stories to fill remaining slots\n  maxPerCategory: 5, // Prevent one desk from dominating the newsletter\n  maxPerSource: 7, // Prevent one publisher from dominating the newsletter\n};\n\nreturn [{ json: config }];"
+      },
+      "id": "f9067576-28b7-4c59-b7da-3db2d9b79a6d",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Central configuration for delivery, ingestion, model usage, and editorial selection. Replace example addresses after import."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - FEED REGISTRY\n * ---------------------------------------------------------------------------\n * Define approved RSS sources and their fallback editorial categories.\n */\n\nconst feeds = [\n  {\n    id: 'scmp-china',\n    name: 'South China Morning Post',\n    sourceCategory: 'china',\n    url: 'https://www.scmp.com/rss/91/feed',\n  },\n  {\n    id: 'lemonde-france-politics',\n    name: 'Le Monde — French Politics',\n    sourceCategory: 'france',\n    url: 'https://www.lemonde.fr/en/politics/rss_full.xml',\n  },\n  {\n    id: 'nyt-us',\n    name: 'The New York Times — U.S.',\n    sourceCategory: 'us',\n    url: 'https://rss.nytimes.com/services/xml/rss/nyt/US.xml',\n  },\n  {\n    id: 'cnbc-business',\n    name: 'CNBC — Business',\n    sourceCategory: 'business',\n    url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664',\n  },\n  {\n    id: 'techcrunch-technology',\n    name: 'TechCrunch',\n    sourceCategory: 'technology',\n    url: 'https://techcrunch.com/feed/',\n  },\n  {\n    id: 'wired-ai',\n    name: 'WIRED — AI',\n    sourceCategory: 'ai',\n    url: 'https://www.wired.com/feed/tag/ai/latest/rss',\n  },\n  {\n    id: 'bbc-world',\n    name: 'BBC News — World',\n    sourceCategory: 'world',\n    url: 'https://feeds.bbci.co.uk/news/world/rss.xml',\n  },\n];\n\nreturn feeds.map((feed) => ({ json: feed }));"
+      },
+      "id": "2800a8b3-e4e0-4e0c-82eb-d1bd794f7d3c",
+      "name": "Load Feed Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3744,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Defines the approved RSS source registry and fallback categories."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "aa802914-0343-43bd-b563-ceb920195a45",
+      "name": "Fetch RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        3968,
+        1536
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "notesInFlow": false,
+      "onError": "continueRegularOutput",
+      "notes": "Reads each configured RSS feed with bounded retries and forwards failures for health evaluation."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - ATTACH FEED METADATA\n * ---------------------------------------------------------------------------\n * Restore source identity and normalize feed health for every RSS item.\n */\n\nconst sources = $('Load Feed Sources').all().map((item) => item.json);\nconst groupedEntries = Array.from({ length: sources.length }, () => []);\nconst sourceIndexById = new Map(sources.map((source, index) => [source.id, index]));\nconst inputEntries = $input.all();\n\nfor (let inputIndex = 0; inputIndex < inputEntries.length; inputIndex++) {\n  const item = inputEntries[inputIndex];\n  let source;\n  try {\n    // Resolve the feed that produced this RSS item.\n    source = $('Load Feed Sources').itemMatching(inputIndex).json;\n  } catch (error) {\n    const raw = item?.json || {};\n    if (raw.title || raw.link || raw.guid || raw.error) {\n      throw new Error('RSS output lost its source pairing; refusing to attach incorrect metadata.');\n    }\n    continue;\n  }\n\n  const sourceIndex = sourceIndexById.get(source?.id);\n  if (!Number.isInteger(sourceIndex)) {\n    throw new Error('RSS output matched an unknown feed source.');\n  }\n  groupedEntries[sourceIndex].push(item);\n}\n\nconst output = [];\n\nfor (let index = 0; index < sources.length; index++) {\n  const source = sources[index];\n  const entries = groupedEntries[index];\n  const base = {\n    sourceId: source.id,\n    sourceName: source.name,\n    sourceCategory: source.sourceCategory,\n    sourceUrl: source.url,\n  };\n\n  const errorEntry = entries.find((item) => item?.json?.error);\n  if (errorEntry) {\n    const message = String(errorEntry.json.error?.message || errorEntry.json.error || 'Unknown RSS error')\n      .replace(/\\s+/g, ' ')\n      .trim()\n      .slice(0, 240);\n\n    console.warn(`[feed] ${source.id}: fetch failed`);\n    output.push({\n      json: {\n        ...base,\n        _feedStatus: 'error',\n        feedError: message,\n      },\n    });\n    continue;\n  }\n\n  const articleEntries = entries.filter((item) => {\n    const raw = item?.json || {};\n    return Boolean(raw.title || raw.link || raw.guid || raw.isoDate || raw.pubDate);\n  });\n\n  if (articleEntries.length === 0) {\n    console.warn(`[feed] ${source.id}: no entries`);\n    output.push({ json: { ...base, _feedStatus: 'empty' } });\n    continue;\n  }\n\n  console.log(`[feed] ${source.id}: ${articleEntries.length} raw entries`);\n  output.push(...articleEntries.map((item) => ({\n    json: {\n      ...item.json,\n      ...base,\n      _feedStatus: 'ok',\n    },\n  })));\n}\n\nreturn output;"
+      },
+      "id": "4d7494a3-e051-4c29-ac5c-0c4a85f43cb4",
+      "name": "Attach Feed Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4192,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Restores source identity from n8n item lineage and standardizes feed status."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - NORMALIZE AND FILTER ARTICLES\n * ---------------------------------------------------------------------------\n * Validate feed health, sanitize RSS fields, enforce quality gates, remove exact\n * duplicates, and assign editorial categories.\n */\n\nconst cfg = $('Configuration').first().json;\nconst configuredFeeds = $('Load Feed Sources').all().map((item) => item.json);\nconst now = Date.now();\nconst cutoffMs = now - cfg.lookbackHours * 60 * 60 * 1000;\nconst futureLimitMs = now + cfg.futureToleranceMinutes * 60 * 1000;\n\nconst CATEGORY_LABELS = {\n  china: '🇨🇳 Çin Gündemi',\n  france: '🇫🇷 Fransa Gündemi',\n  us: '🇺🇸 ABD Gündemi',\n  asia: '🌏 Asya Gündemi',\n  business: '💰 Ekonomi & Finans',\n  technology: '💻 Teknoloji',\n  ai: '🤖 Yapay Zeka',\n  world: '🌍 Dünya Gündemi',\n};\n\nconst NOISE_URL = /\\/(sport|sports|style|fashion|food|travel|obituaries|crossword|crosswords|games|puzzles|lifestyle|entertainment|showbiz|shopping|deals|horoscope|video|videos|in-pictures|picture-gallery|audio|podcasts)(?:\\/|$)/i;\nconst NOISE_TITLE = /^(watch|listen|video|photos|pictures|gallery|quiz|live updates|photo gallery|wordle|daily puzzle|recipe|horoscope|in pictures|audio)\\b\\s*[:\\-—]?/i;\nconst TRACKING_PARAMETERS = new Set(['fbclid', 'gclid', 'mc_cid', 'mc_eid', 'ref_src', 'ref_url']);\n\nconst NAMED_ENTITIES = {\n  '&amp;': '&',\n  '&lt;': '<',\n  '&gt;': '>',\n  '&quot;': '\"',\n  '&apos;': \"'\",\n  '&#39;': \"'\",\n  '&nbsp;': ' ',\n};\n\nfunction decodeEntities(value) {\n  return String(value ?? '')\n    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))\n    .replace(/&#(\\d+);/g, (_, code) => String.fromCodePoint(Number(code)))\n    .replace(/&(?:amp|lt|gt|quot|apos|nbsp);/g, (match) => NAMED_ENTITIES[match] ?? ' ');\n}\n\nfunction toPlainText(value) {\n  return decodeEntities(String(value ?? '').replace(/<[^>]*>/g, ' '))\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction trimToWord(text, maxLength) {\n  if (text.length <= maxLength) return text;\n  const cut = text.slice(0, maxLength);\n  const lastSpace = cut.lastIndexOf(' ');\n  const boundary = lastSpace > maxLength * 0.6 ? lastSpace : maxLength;\n  return `${cut.slice(0, boundary).trim()}…`;\n}\n\nfunction parseHttpUrl(rawUrl) {\n  const value = String(rawUrl || '').trim();\n  const match = value.match(/^(https?):\\/\\/([^\\/?#]+)([^?#]*)(?:\\?([^#]*))?(?:#.*)?$/i);\n  if (!match || match[2].includes('@')) return null;\n\n  const protocol = match[1].toLowerCase();\n  const authority = match[2].toLowerCase().replace(/^www\\./, '');\n  const hostname = authority.replace(/:\\d+$/, '');\n  const pathname = (match[3] || '/')\n    .replace(/\\/{2,}/g, '/')\n    .replace(/\\/$/, '') || '/';\n\n  const queryParts = (match[4] || '')\n    .split('&')\n    .filter(Boolean)\n    .filter((part) => {\n      const encodedKey = part.split('=', 1)[0];\n      let key = encodedKey;\n      try {\n        key = decodeURIComponent(encodedKey);\n      } catch {\n        // Keep the original key if a publisher sends malformed percent-encoding.\n      }\n      key = key.toLowerCase();\n      return !key.startsWith('utm_') && !TRACKING_PARAMETERS.has(key);\n    })\n    .sort();\n\n  const query = queryParts.length ? `?${queryParts.join('&')}` : '';\n  return {\n    href: `${protocol}://${authority}${pathname}${query}`,\n    hostname,\n    pathname,\n  };\n}\n\nfunction titleKey(title) {\n  return title\n    .normalize('NFKD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}\\s]/gu, ' ')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction resolveCategory(raw, url, title, snippet) {\n  const probe = `${url.pathname} ${title} ${snippet}`.toLowerCase();\n\n  const rules = [\n    ['france', /\\b(france|french|macron|assemblée nationale|elysée)\\b|\\/en\\/(?:politics|france)\\//i],\n    ['china', /\\b(china|chinese|beijing|hong kong)\\b|\\/(?:china|hong-kong)\\//i],\n    ['asia', /\\b(asia|asian|asia-pacific|india|indian|pakistan|pakistani|bangladesh|bangladeshi|sri lanka|sri lankan|nepal|nepalese|bhutan|maldives|afghanistan|afghan|japan|japanese|south korea|north korea|korean|taiwan|taiwanese|mongolia|mongolian|indonesia|indonesian|malaysia|malaysian|singapore|singaporean|thailand|thai|vietnam|vietnamese|philippines|filipino|myanmar|cambodia|cambodian|laos|laotian|southeast asia|south asia|east asia)\\b|\\/(?:week-asia|asia|south-asia|southeast-asia|east-asia)\\//i],\n    ['us', /\\b(united states|u\\.s\\.|american|white house|congress|federal reserve|trump|washington)\\b|\\/(?:us|united-states)\\//i],\n    ['world', /\\/(?:world|europe|middle-east|africa)\\//i],\n    ['ai', /\\b(artificial intelligence|openai|chatgpt|gemini|large language model|llm|machine learning|deepmind|anthropic|yapay zeka)\\b/i],\n    ['technology', /\\b(technology|software|cybersecurity|semiconductor|microchip|startup|data cent(?:er|re)|smartphone|cloud computing|robotics)\\b/i],\n    ['business', /\\b(economy|economic|inflation|central bank|interest rate|stock market|earnings|finance|banking|tariff|trade deal|revenue)\\b/i],\n  ];\n\n  const matched = rules.find(([, pattern]) => pattern.test(probe));\n  if (matched) return matched[0];\n  return CATEGORY_LABELS[raw.sourceCategory] ? raw.sourceCategory : 'world';\n}\n\nconst feedState = new Map(configuredFeeds.map((feed) => [feed.id, {\n  id: feed.id,\n  name: feed.name,\n  status: 'missing',\n  error: '',\n}]));\n\nfor (const item of $input.all()) {\n  const raw = item.json || {};\n  if (!raw.sourceId || !feedState.has(raw.sourceId)) continue;\n  const state = feedState.get(raw.sourceId);\n  if (raw._feedStatus === 'error') {\n    state.status = 'error';\n    state.error = String(raw.feedError || 'RSS fetch failed').slice(0, 240);\n  } else if (raw._feedStatus === 'ok') {\n    state.status = 'ok';\n  } else if (raw._feedStatus === 'empty' && state.status === 'missing') {\n    state.status = 'empty';\n  }\n}\n\nconst feedHealth = [...feedState.values()];\nconst healthySources = feedHealth.filter(({ status }) => status === 'ok' || status === 'empty').length;\nconst failedSources = feedHealth.filter(({ status }) => status === 'error' || status === 'missing');\n\nif (healthySources < cfg.minHealthySources) {\n  throw new Error(`Feed health gate failed: ${healthySources}/${configuredFeeds.length} sources are healthy.`);\n}\n\nconst stats = {\n  configuredSources: configuredFeeds.length,\n  healthySources,\n  failedSources,\n  totalIncoming: 0,\n  kept: 0,\n  skippedInvalid: 0,\n  skippedNoDate: 0,\n  skippedTooOld: 0,\n  skippedFuture: 0,\n  skippedDuplicate: 0,\n  skippedNoise: 0,\n  skippedQuota: 0,\n};\n\nconst seenUrls = new Set();\nconst seenTitles = new Set();\nconst perSource = {};\nconst articles = [];\n\nfor (const item of $input.all()) {\n  const raw = item.json || {};\n  if (raw._feedStatus !== 'ok') continue;\n  stats.totalIncoming++;\n\n  const rawLink = [raw.link, raw.link?._, raw.guid, raw.guid?._]\n    .find((value) => typeof value === 'string' && /^https?:\\/\\//i.test(value.trim()));\n  const parsedUrl = parseHttpUrl(rawLink);\n  const link = parsedUrl?.href || '';\n  const title = toPlainText(raw.title);\n\n  if (!link || title.length < cfg.minTitleLength) {\n    stats.skippedInvalid++;\n    continue;\n  }\n\n  const publishedMs = Date.parse(raw.isoDate || raw.pubDate || raw.date || '');\n  if (!Number.isFinite(publishedMs)) {\n    stats.skippedNoDate++;\n    continue;\n  }\n  if (publishedMs < cutoffMs) {\n    stats.skippedTooOld++;\n    continue;\n  }\n  if (publishedMs > futureLimitMs) {\n    stats.skippedFuture++;\n    continue;\n  }\n\n  const nameKey = titleKey(title);\n  if (seenUrls.has(link) || seenTitles.has(nameKey)) {\n    stats.skippedDuplicate++;\n    continue;\n  }\n  if (NOISE_URL.test(parsedUrl.pathname) || NOISE_TITLE.test(title)) {\n    stats.skippedNoise++;\n    continue;\n  }\n\n  const sourceId = raw.sourceId || parsedUrl.hostname;\n  perSource[sourceId] = (perSource[sourceId] || 0) + 1;\n  if (perSource[sourceId] > cfg.maxArticlesPerSource) {\n    stats.skippedQuota++;\n    continue;\n  }\n\n  const body = toPlainText(raw.contentSnippet || raw.content || raw.description || '');\n  const snippet = trimToWord(body, cfg.snippetLength);\n  const category = resolveCategory(raw, parsedUrl, title, snippet);\n\n  seenUrls.add(link);\n  seenTitles.add(nameKey);\n  articles.push({\n    id: `a${articles.length}`,\n    title,\n    link,\n    snippet,\n    category,\n    categoryLabel: CATEGORY_LABELS[category],\n    sourceId,\n    source: raw.sourceName || parsedUrl.hostname,\n    sourceDomain: parsedUrl.hostname,\n    publishedAt: new Date(publishedMs).toISOString(),\n  });\n}\n\nstats.kept = articles.length;\nstats.sourcesWithArticles = Object.keys(perSource).length;\n\nconsole.log('[normalize]', JSON.stringify(stats));\nreturn [{ json: { articles, stats } }];"
+      },
+      "id": "ba39b7c5-d9eb-4e7d-910f-735804b93e7c",
+      "name": "Normalize & Filter Articles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4416,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Validates feed health, sanitizes RSS fields, filters stale or noisy items, and assigns categories."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - BUILD SCORING BATCHES\n * ---------------------------------------------------------------------------\n * Distribute normalized articles across a bounded number of balanced LLM\n * calls while retaining a complete ID-to-article lookup.\n */\n\nconst cfg = $('Configuration').first().json;\nconst input = $input.first().json;\nconst articles = Array.isArray(input.articles) ? input.articles : [];\nconst articlesById = Object.fromEntries(articles.map((article) => [article.id, article]));\n\nif (articles.length === 0) {\n  return [{\n    json: {\n      batchIndex: 0,\n      batchCount: 1,\n      articleCount: 0,\n      articlesById,\n      ingestionStats: input.stats || {},\n      payload: [],\n    },\n  }];\n}\n\nconst batchCount = Math.min(\n  Math.max(1, Number(cfg.targetBatchCount) || 1),\n  articles.length,\n);\nconst groups = new Map();\n\nfor (const article of articles) {\n  const category = article.category || 'world';\n  if (!groups.has(category)) groups.set(category, []);\n  groups.get(category).push(article);\n}\n\nfor (const group of groups.values()) {\n  group.sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt));\n}\n\nconst buckets = Array.from({ length: batchCount }, () => []);\nconst categories = [...groups.keys()].sort();\nconst cursors = new Map(categories.map((category) => [category, 0]));\nlet bucketIndex = 0;\nlet added = true;\n\nwhile (added) {\n  added = false;\n  for (const category of categories) {\n    const cursor = cursors.get(category);\n    const group = groups.get(category);\n    if (cursor >= group.length) continue;\n\n    buckets[bucketIndex % batchCount].push(group[cursor]);\n    cursors.set(category, cursor + 1);\n    bucketIndex++;\n    added = true;\n  }\n}\n\nconsole.log(`[batches] ${articles.length} articles across ${batchCount} scoring calls`);\nreturn buckets.map((batch, index) => ({\n  json: {\n    batchIndex: index,\n    batchCount,\n    articleCount: articles.length,\n    articlesById,\n    ingestionStats: input.stats || {},\n    payload: batch.map(({ id, category, source, publishedAt, title, snippet }) => ({\n      id,\n      category,\n      source,\n      publishedAt,\n      title,\n      snippet,\n    })),\n  },\n}));"
+      },
+      "id": "59afcc54-5c2e-47fc-ba8c-73f38e594ff1",
+      "name": "Build Scoring Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4640,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Creates balanced scoring batches while retaining a complete article lookup."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a highly selective senior international news editor. Score EVERY article in the payload. Return every supplied id exactly once, unchanged, and in the same order. Never merge, omit, duplicate, or invent an id.\n\nPUBLICATION GATE\n- A score of 6 is the publication threshold, not an average score.\n- Award 6-10 only when the supplied title or snippet explicitly demonstrates a fresh, concrete development with meaningful public, policy, economic, security, or technological consequences.\n- Prominence, recency, institutional approval, or a famous actor does not by itself justify publication.\n- Do not infer systemic importance, precedent, scale, motive, or consequences that the supplied text does not state.\n- Most articles in a mixed general-news batch should score 3-5. Scores of 6 or above should be a clear minority.\n\nCALIBRATION ANCHORS\n10 - A major power launches a full-scale invasion of another country.\n8 - A central bank unexpectedly cuts interest rates by 50 basis points.\n6 - A government enacts a national policy with direct consequences for millions of people.\n5 - A global technology company launches a flagship product or receives a company-specific commercial approval.\n4 - A listed company reports 3% quarterly revenue growth.\n2 - An actor promotes a new film.\n\nMANDATORY SCORE CAPS\n- Analysis, opinion, preview, poll, retrospective, explainer, or human-interest follow-up: maximum 5.\n- Plans, intentions, forecasts, warnings, negotiations, and scheduled events: maximum 5 unless they include a formal decision or material commitment.\n- Reactions and routine updates: maximum 5 unless they materially change the event's outcome, scale, or public impact.\n- A single company's product launch, commercial permit, temporary exemption, funding round, earnings update, executive comment, or workforce change: maximum 5 unless the supplied text explicitly demonstrates sector-wide, national, or systemic consequences.\n- Unconfirmed claims, speculation, or reports whose central action has not happened: maximum 5.\n- Scores 8-10 require a newly confirmed event with broad, material national or international consequences. Use 9-10 only for exceptional events.\n\nSCORING BANDS\n9-10 - Exceptional historic event with immediate, very broad international consequences.\n7-8 - Major new national or international decision, crisis, disaster, or economic change with broad direct impact.\n6 - Confirmed new development with explicit national, cross-border, sector-wide, or major public consequences.\n4-5 - Notable but non-essential: limited impact, routine institutional news, single-company development, analysis, or follow-up.\n2-3 - Narrow, incremental, promotional, speculative, or mainly human-interest content.\n1 - Noise or content with almost no general-news value.\n\nASSESSMENT FACTORS\n- Reach: how many people, institutions, markets, or countries are directly affected?\n- Materiality: did something consequential happen, or is it discussion, reaction, intention, or routine administration?\n- Novelty: is this a genuinely new development rather than another angle on an existing event?\n- Persistence: are the effects likely to last beyond the immediate news cycle?\n- Public interest: does it directly affect safety, rights, health, livelihoods, policy, or critical infrastructure?\n\nRULES\n- Judge the underlying facts, not sensational wording.\n- Use only the supplied title and snippet. Never add outside knowledge.\n- Preserve uncertainty and attribution in the reason. Words such as allegedly, reportedly, probably, may, or could must not become facts.\n- Never describe a decision as precedent-setting, systemic, historic, or industry-wide unless the supplied text explicitly says so.\n- When uncertain between two scores, choose the lower score.\n- reason must be one factual English sentence of at most 18 words.\n- Before responding, verify that output row count equals payload row count and every id appears once.\n- If the payload is empty, return [].\n\nOUTPUT\nReturn a raw JSON array only. No markdown fences or commentary.\nSchema: [{\"id\":\"a0\",\"score\":8,\"reason\":\"A confirmed military escalation directly affects several countries and public safety.\"}]\n\nPAYLOAD:\n{{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "ff35982b-8c66-4876-9d94-2f21ec42ced8",
+      "name": "Score Articles (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        4864,
+        1536
+      ],
+      "notesInFlow": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Applies the publication rubric and returns one score for every immutable article ID."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - VALIDATE, RANK, AND SELECT\n * ---------------------------------------------------------------------------\n * Validate every model score and select a balanced running order under\n * category and source limits.\n */\n\nconst cfg = $('Configuration').first().json;\nconst batchDefinitions = $('Build Scoring Batches').all().map((item) => item.json);\nconst modelOutputs = $input.all();\nconst firstBatch = batchDefinitions[0] || {};\nconst articlesById = firstBatch.articlesById || {};\nconst ingestionStats = firstBatch.ingestionStats || {};\n\nfunction parseJsonArray(value) {\n  if (Array.isArray(value)) return value;\n  const text = String(value ?? '').trim()\n    .replace(/^```(?:json)?\\s*/i, '')\n    .replace(/\\s*```$/, '');\n  const parsed = JSON.parse(text);\n  if (!Array.isArray(parsed)) throw new TypeError('Model output is not a JSON array.');\n  return parsed;\n}\n\nfunction validateRow(row, expectedIds, seenIds, batchIndex) {\n  if (!row || typeof row !== 'object' || Array.isArray(row)) {\n    throw new TypeError(`Batch ${batchIndex}: score row must be an object.`);\n  }\n  if (typeof row.id !== 'string' || !expectedIds.has(row.id)) {\n    throw new TypeError(`Batch ${batchIndex}: unknown or invalid article id.`);\n  }\n  if (seenIds.has(row.id)) {\n    throw new TypeError(`Batch ${batchIndex}: duplicate article id ${row.id}.`);\n  }\n  if (!Number.isInteger(row.score) || row.score < 1 || row.score > 10) {\n    throw new TypeError(`Batch ${batchIndex}: ${row.id} has an invalid integer score.`);\n  }\n  if (typeof row.reason !== 'string' || !row.reason.trim() || row.reason.length > 180) {\n    throw new TypeError(`Batch ${batchIndex}: ${row.id} has an invalid reason.`);\n  }\n}\n\nif (modelOutputs.length !== batchDefinitions.length) {\n  throw new Error(`Scoring output count mismatch: expected ${batchDefinitions.length}, received ${modelOutputs.length}.`);\n}\n\nconst scored = new Map();\nlet expectedTotal = 0;\n\nfor (let index = 0; index < batchDefinitions.length; index++) {\n  const definition = batchDefinitions[index];\n  const expectedIds = new Set((definition.payload || []).map(({ id }) => id));\n  const output = modelOutputs[index]?.json?.output\n    ?? modelOutputs[index]?.json?.text\n    ?? modelOutputs[index]?.json?.response\n    ?? modelOutputs[index]?.json?.message?.content\n    ?? '';\n  const rows = parseJsonArray(output);\n  const seenIds = new Set();\n  expectedTotal += expectedIds.size;\n\n  for (const row of rows) {\n    validateRow(row, expectedIds, seenIds, index);\n    seenIds.add(row.id);\n    scored.set(row.id, {\n      score: row.score,\n      reason: row.reason.trim(),\n    });\n  }\n\n  const missingIds = [...expectedIds].filter((id) => !seenIds.has(id));\n  if (missingIds.length > 0) {\n    throw new Error(`Batch ${index}: model omitted ${missingIds.length} article id(s).`);\n  }\n}\n\nconst scoringCoverage = expectedTotal === 0 ? 1 : scored.size / expectedTotal;\nif (scoringCoverage < cfg.minScoringCoverage) {\n  throw new Error(`Scoring coverage gate failed: ${(scoringCoverage * 100).toFixed(1)}%.`);\n}\n\nconst byImportance = (left, right) =>\n  right.score - left.score || Date.parse(right.publishedAt) - Date.parse(left.publishedAt);\nconst candidates = [...scored.entries()]\n  .map(([id, verdict]) => ({ ...articlesById[id], ...verdict }))\n  .filter((article) => article.id)\n  .sort(byImportance);\n\nconst selected = [];\nconst chosenIds = new Set();\nconst perCategory = {};\nconst perSource = {};\n\nfunction canSelect(article) {\n  if (chosenIds.has(article.id)) return false;\n  if ((perCategory[article.category] || 0) >= cfg.maxPerCategory) return false;\n  if ((perSource[article.sourceId] || 0) >= cfg.maxPerSource) return false;\n  return true;\n}\n\nfunction select(article) {\n  selected.push(article);\n  chosenIds.add(article.id);\n  perCategory[article.category] = (perCategory[article.category] || 0) + 1;\n  perSource[article.sourceId] = (perSource[article.sourceId] || 0) + 1;\n}\n\n// Pass 1: the strongest eligible article from every represented category.\nfor (const article of candidates) {\n  if (selected.length >= cfg.maxHeadlines) break;\n  if (perCategory[article.category]) continue;\n  if (article.score < cfg.categoryLeaderMinScore) continue;\n  if (canSelect(article)) select(article);\n}\n\n// Pass 2: score-ranked fill under source and category caps.\nfor (const article of candidates) {\n  if (selected.length >= cfg.maxHeadlines) break;\n  if (article.score < cfg.fillMinScore) continue;\n  if (canSelect(article)) select(article);\n}\n\nselected.sort(byImportance);\nif (selected.length < cfg.minHeadlines) {\n  throw new Error(`Editorial gate failed: selected ${selected.length}/${cfg.minHeadlines} required headlines.`);\n}\n\nconst stats = {\n  ...ingestionStats,\n  batchesExecuted: modelOutputs.length,\n  scoringCoverage,\n  scored: scored.size,\n  candidates: candidates.length,\n  categoriesRepresented: Object.keys(perCategory).length,\n  sourcesRepresented: Object.keys(perSource).length,\n  selected: selected.length,\n  selectedPerCategory: perCategory,\n  selectedPerSource: perSource,\n};\n\nconsole.log('[selection]', JSON.stringify(stats));\nreturn [{\n  json: {\n    selected,\n    stats,\n    forSummary: selected.map(({ id, title, snippet, categoryLabel, source, publishedAt }) => ({\n      id,\n      title,\n      snippet,\n      category: categoryLabel,\n      source,\n      publishedAt,\n    })),\n  },\n}];"
+      },
+      "id": "d1ae5ce3-0844-4c12-ba9a-f3060d88c260",
+      "name": "Rank & Select Headlines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5088,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Validates model output and enforces configured score, source, and category limits."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a professional Turkish news editor. Write one Turkish headline and summary for EVERY article. Return every supplied id exactly once, unchanged, and in the same order.\n\nFACTUAL FIDELITY — HIGHEST PRIORITY\n- Use only facts explicitly present in `title` and `snippet`; never use outside knowledge.\n- Preserve names, dates, attribution, tense, scope, conditions, and qualifiers.\n- Do not add a likely consequence, motive, causal claim, or interpretation unless the source text explicitly states it.\n- Never broaden a limited claim. A result from a test, weakened system, subset, sample, single location, or specific period must not become a claim about the entire technology, industry, country, or population.\n- Preserve certainty exactly. Words such as `may`, `might`, `could`, `plans`, `seeks`, `considers`, `is ready to`, `reportedly`, and `according to` must remain conditional or attributed in Turkish. Never turn them into `will`, `decided`, `proved`, `caused`, or an unqualified fact.\n- If the source does not provide enough detail for a stronger sentence, write the narrower and more cautious sentence.\n- Use neutral language. Do not intensify the source or imply confession, scandal, success, failure, blame, or certainty that the source does not express.\n\nTURKISH LANGUAGE QUALITY\n- Use natural, professional newsroom Turkish rather than literal word-for-word translation.\n- Use established Turkish institution names when the source identifies the institution; for example, FTC is \"ABD Federal Ticaret Komisyonu\".\n- Apply Turkish capitalization, punctuation, and apostrophe rules to proper nouns and institutional names.\n\nHEADLINE\n- Turkish, one line, 8-16 words, no emoji, question, teaser, or clickbait.\n- State the actor and the sourced action or development clearly.\n- Prefer a concrete verb.\n- If the snippet materially narrows or qualifies the source headline, preserve that limitation in the Turkish headline.\n- Do not translate mechanically; write natural Turkish without changing meaning.\n\nSUMMARY\n- Write 1-2 concise Turkish sentences, at most 70 words total.\n- Explain only what happened and the source-supported context.\n- Do not repeat the headline word for word.\n\nVALIDATION\n- Verify that output row count equals payload row count and every id appears once.\n- Check every headline and summary claim against the supplied title or snippet.\n- Check that no qualifier, limitation, attribution, or uncertainty was removed.\n- Check that no verb is more certain or broader than the source wording.\n- If payload is empty, return [].\n\nOUTPUT\nReturn a raw JSON array only. No markdown fences or commentary.\nSchema: [{\"id\":\"a0\",\"title\":\"...\",\"summary\":\"...\"}]\n\nPAYLOAD:\n{{ JSON.stringify($json.forSummary) }}",
+        "options": {}
+      },
+      "id": "21323b21-cd35-4dbd-a8ab-d935b2881a7a",
+      "name": "Summarize in Turkish (LLM)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        5312,
+        1536
+      ],
+      "notesInFlow": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Produces factual Turkish headlines and summaries for every selected story."
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * AI DAILY NEWS REPORTER - VALIDATE COPY AND RENDER NEWSLETTER\n * ---------------------------------------------------------------------------\n * Validate generated Turkish copy and render equivalent HTML and plain-text email bodies.\n */\n\nconst cfg = $('Configuration').first().json;\nconst selection = $('Rank & Select Headlines').first().json;\nconst stories = selection.selected || [];\nconst stats = selection.stats || {};\n\nconst COLORS = {\n  page: '#f1f5f9',\n  card: '#ffffff',\n  brand: '#059669',\n  brandDark: '#047857',\n  brandTint: '#d1fae5',\n  text: '#1f2937',\n  muted: '#64748b',\n  border: '#e2e8f0',\n  warningBackground: '#fff7ed',\n  warningText: '#9a3412',\n};\n\nfunction escapeHtml(value) {\n  return String(value ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\n}\n\nfunction safeUrl(value) {\n  const url = String(value ?? '').trim();\n  return /^https?:\\/\\//i.test(url) ? escapeHtml(url) : '#';\n}\n\nfunction parseJsonArray(value) {\n  if (Array.isArray(value)) return value;\n  const text = String(value ?? '').trim()\n    .replace(/^```(?:json)?\\s*/i, '')\n    .replace(/\\s*```$/, '');\n  const parsed = JSON.parse(text);\n  if (!Array.isArray(parsed)) throw new TypeError('Summary output is not a JSON array.');\n  return parsed;\n}\n\nfunction wordCount(value) {\n  const text = String(value ?? '').trim();\n  return text ? text.split(/\\s+/u).length : 0;\n}\n\nfunction validateSummary(row, story) {\n  if (!row || typeof row !== 'object' || Array.isArray(row)) {\n    throw new TypeError('Every summary row must be an object.');\n  }\n\n  const title = typeof row.title === 'string' ? row.title.trim() : '';\n  const summary = typeof row.summary === 'string' ? row.summary.trim() : '';\n  const titleWords = wordCount(title);\n  const summaryWords = wordCount(summary);\n\n  if (\n    title.length < 12\n    || title.length > 180\n    || titleWords < 8\n    || titleWords > 16\n    || /[\\r\\n]/.test(title)\n    || /\\p{Extended_Pictographic}/u.test(title)\n  ) {\n    throw new TypeError(`${story.id}: generated title violates editorial format limits.`);\n  }\n  if (summary.length < 20 || summary.length > 700 || summaryWords > 70) {\n    throw new TypeError(`${story.id}: generated summary violates editorial format limits.`);\n  }\n}\n\nif (stories.length === 0) {\n  throw new Error('Delivery stopped: no headlines passed the editorial gate.');\n}\n\nconst output = $input.first().json.output\n  ?? $input.first().json.text\n  ?? $input.first().json.response\n  ?? $input.first().json.message?.content\n  ?? '';\nconst rows = parseJsonArray(output);\nconst expectedIds = new Set(stories.map(({ id }) => id));\nconst summaries = new Map();\n\nfor (const row of rows) {\n  if (typeof row?.id !== 'string' || !expectedIds.has(row.id)) {\n    throw new TypeError('Summary output contains an unknown or invalid article id.');\n  }\n  if (summaries.has(row.id)) throw new TypeError(`Summary output duplicated ${row.id}.`);\n  const story = stories.find(({ id }) => id === row.id);\n  validateSummary(row, story);\n  summaries.set(row.id, { title: row.title.trim(), summary: row.summary.trim() });\n}\n\nconst missingIds = [...expectedIds].filter((id) => !summaries.has(id));\nif (missingIds.length > 0) {\n  throw new Error(`Summary output omitted ${missingIds.length} selected article(s).`);\n}\n\nconst now = new Date();\nconst issueDate = now.toLocaleDateString(cfg.locale, {\n  weekday: 'long',\n  year: 'numeric',\n  month: 'long',\n  day: 'numeric',\n  timeZone: cfg.timeZone,\n});\nfunction formatTimestamp(iso) {\n  return new Date(iso).toLocaleString(cfg.locale, {\n    day: '2-digit',\n    month: 'short',\n    hour: '2-digit',\n    minute: '2-digit',\n    timeZone: cfg.timeZone,\n  });\n}\n\nfunction renderStory(story, index) {\n  const summary = summaries.get(story.id);\n  const url = safeUrl(story.link);\n  return `\n      <tr>\n        <td style=\"padding:0 0 16px 0;\">\n          <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" bgcolor=\"${COLORS.card}\" style=\"background-color:${COLORS.card};border:1px solid ${COLORS.border};border-left:4px solid ${COLORS.brand};border-radius:10px;\">\n            <tr><td style=\"padding:20px 22px;\">\n              <p style=\"margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${COLORS.brandDark};\">${escapeHtml(story.categoryLabel)}</p>\n              <h2 style=\"margin:0 0 10px;font-size:18px;line-height:1.35;font-weight:700;\"><a href=\"${url}\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"color:${COLORS.text};text-decoration:none;\">${escapeHtml(summary.title)}</a></h2>\n              <p style=\"margin:0 0 18px;font-size:14.5px;line-height:1.6;color:${COLORS.text};\">${escapeHtml(summary.summary)}</p>\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\"><tr>\n                <td align=\"left\" style=\"font-size:12px;color:${COLORS.muted};\">${index + 1} &middot; ${escapeHtml(story.source)} &middot; ${escapeHtml(formatTimestamp(story.publishedAt))} &middot; <strong style=\"color:${COLORS.brandDark};\">${story.score}/10</strong></td>\n                <td align=\"right\"><a href=\"${url}\" target=\"_blank\" rel=\"noopener noreferrer\" bgcolor=\"${COLORS.brand}\" style=\"display:inline-block;background-color:${COLORS.brand};color:#fff;font-size:13px;font-weight:700;padding:9px 16px;border-radius:6px;text-decoration:none;\">Haberi oku</a></td>\n              </tr></table>\n            </td></tr>\n          </table>\n        </td>\n      </tr>`;\n}\n\nconst failedSources = Array.isArray(stats.failedSources) ? stats.failedSources : [];\nconst warning = failedSources.length === 0 ? '' : `\n      <tr><td bgcolor=\"${COLORS.warningBackground}\" style=\"padding:12px 16px;border:1px solid #fed7aa;border-radius:8px;color:${COLORS.warningText};font-size:12px;line-height:1.5;\">\n        Kaynak uyarısı: ${escapeHtml(failedSources.map(({ name }) => name).join(', '))} bu sayıya veri sağlayamadı.\n      </td></tr>\n      <tr><td style=\"height:16px;font-size:0;line-height:16px;\">&nbsp;</td></tr>`;\n\nconst subject = `${cfg.subjectPrefix} · ${issueDate}`;\nconst preheader = summaries.get(stories[0].id).title;\nconst cards = stories.map(renderStory).join('');\nconst html = `<!doctype html>\n<html lang=\"tr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>${escapeHtml(subject)}</title></head>\n<body style=\"margin:0;padding:0;background-color:${COLORS.page};\">\n  <div style=\"display:none;max-height:0;overflow:hidden;opacity:0;\">${escapeHtml(preheader)}</div>\n  <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" bgcolor=\"${COLORS.page}\"><tr><td align=\"center\" style=\"padding:24px 12px;\">\n    <table role=\"presentation\" width=\"680\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"width:100%;max-width:680px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">\n      <tr><td bgcolor=\"${COLORS.brand}\" style=\"background-color:${COLORS.brand};border-radius:10px;padding:28px 24px;text-align:center;\"><h1 style=\"margin:0 0 6px;font-size:25px;font-weight:800;color:#fff;\">${escapeHtml(cfg.headerTitle)}</h1><p style=\"margin:0;font-size:14px;font-weight:600;color:${COLORS.brandTint};\">${escapeHtml(issueDate)}</p></td></tr>\n      <tr><td style=\"height:24px;font-size:0;line-height:24px;\">&nbsp;</td></tr>\n      ${warning}\n      ${cards}\n      <tr><td style=\"padding:18px 8px 0;border-top:1px solid ${COLORS.border};text-align:center;\"><p style=\"margin:0;font-size:12px;color:${COLORS.muted};\">${stats.totalIncoming || 0} haber tarandı &rarr; ${stats.scored || 0} analiz edildi &rarr; ${stories.length} seçildi</p></td></tr>\n    </table>\n  </td></tr></table>\n</body></html>`;\n\nconst text = [\n  `${cfg.headerTitle} — ${issueDate}`,\n  failedSources.length ? `Kaynak uyarısı: ${failedSources.map(({ name }) => name).join(', ')}` : '',\n  '',\n  ...stories.map((story, index) => {\n    const summary = summaries.get(story.id);\n    return `${index + 1}. [${story.categoryLabel}] ${summary.title} (${story.score}/10)\\n${summary.summary}\\n${story.link}\\n`;\n  }),\n  `${stats.totalIncoming || 0} haber tarandı; ${stats.scored || 0} analiz edildi; ${stories.length} haber seçildi.`,\n].filter(Boolean).join('\\n');\n\nreturn [{\n  json: {\n    subject,\n    html,\n    text,\n    storyCount: stories.length,\n    deliveryStats: stats,\n  },\n}];"
+      },
+      "id": "4058d9a2-fefc-4a5f-9e94-7a72f302d572",
+      "name": "Render HTML Newsletter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5536,
+        1536
+      ],
+      "notesInFlow": false,
+      "notes": "Validates Turkish copy and renders equivalent HTML and plain-text newsletter bodies."
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Configuration').first().json.senderEmail }}",
+        "toEmail": "={{ $('Configuration').first().json.recipientEmail }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.text }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "c3e30147-027d-4ec9-9ce2-fdbc1a802a3a",
+      "name": "Send Newsletter Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        5760,
+        1536
+      ],
+      "notesInFlow": false,
+      "webhookId": "65ac859d-06a7-4183-8f00-1269ac934d0c",
+      "notes": "Sends the multipart newsletter. Configure an SMTP credential after import."
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.5-flash",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "a1f07f7e-242f-4ac5-a650-ddbf628e3fd5",
+      "name": "Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        5088,
+        1792
+      ],
+      "notesInFlow": false,
+      "notes": "Shared Gemini model for scoring and Turkish copy generation."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Load Feed Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Feed Sources": {
+      "main": [
+        [
+          {
+            "node": "Fetch RSS Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch RSS Feed": {
+      "main": [
+        [
+          {
+            "node": "Attach Feed Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Feed Metadata": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Filter Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Filter Articles": {
+      "main": [
+        [
+          {
+            "node": "Build Scoring Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Scoring Batches": {
+      "main": [
+        [
+          {
+            "node": "Score Articles (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Articles (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Rank & Select Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rank & Select Headlines": {
+      "main": [
+        [
+          {
+            "node": "Summarize in Turkish (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize in Turkish (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Render HTML Newsletter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render HTML Newsletter": {
+      "main": [
+        [
+          {
+            "node": "Send Newsletter Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Score Articles (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Summarize in Turkish (LLM)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "de04645a-6f93-4349-bcc5-b3761c21055a",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "c5f52be45c78927339a9be1db7003e0ef74a1a56d39ceb996f56425f0ef43ae0"
+  },
+  "nodeGroups": [],
+  "id": "PyacNKh9yv5i2TAJ",
+  "tags": []
+}
