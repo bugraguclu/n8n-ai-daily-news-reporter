@@ -2,3 +2,6 @@
 *.local.json
 .DS_Store
 node_modules/
+
+# Private server deployment files
+/deploy/
