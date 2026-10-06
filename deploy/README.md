@@ -4,6 +4,8 @@ This directory runs the free, self-hosted n8n Community edition on the existing 
 
 The server's `deploy/.env` contains a randomly generated `N8N_ENCRYPTION_KEY`. Keep it private and backed up: losing it makes saved credentials unreadable. The `n8n_data` Docker volume holds the SQLite database and other n8n state. Neither the volume nor `.env` is tracked by Git.
 
+The free Registered Community activation key is stored in the same private `.env` and on the Mac at `~/.config/hisse-n8n/community-key`. n8n renews its license certificate automatically. The Community edition itself remains free even without this key.
+
 Run or update from this directory with `docker compose up -d`. The image is pinned to `1.123.83`, compatible with the workflow's n8n v1 requirement. Review a newer version and take a backup before changing the pin.
 
 The `backup.sh` script makes a consistent SQLite backup plus an encryption-key copy in `~/backups/n8n`, verifies database integrity, and keeps 14 days of local backups. The encryption key is also copied to the Mac at `~/.config/hisse-n8n/encryption-key`.

@@ -9,6 +9,7 @@ services:
       WEBHOOK_URL: https://n8n.hisse-analizi.duckdns.org/
       N8N_PROXY_HOPS: "1"
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_LICENSE_ACTIVATION_KEY: ${N8N_LICENSE_ACTIVATION_KEY:-}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
       N8N_SECURE_COOKIE: "true"
       N8N_DIAGNOSTICS_ENABLED: "false"
